@@ -1,0 +1,45 @@
+# ---- Secrets: never commit ----
+.env
+.env.*
+!.env.example
+
+# ---- Corpus: large, and redistribution is not ours to make ----
+data/
+
+# ---- Generated artifacts: rebuildable from source, so not versioned ----
+faiss_index/
+*.faiss
+*.pkl
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# ---- Jupyter ----
+.ipynb_checkpoints/
+
+# ---- Model / HF caches, if they ever land in-tree ----
+.cache/
+models/
+
+# ---- Local-only working files ----
+# NOTE: gitignore has no inline comments -- a trailing "# ..." becomes part of
+# the pattern. Comments must sit on their own line, as here.
+# The original project brief, kept local rather than published:
+prompt.md
+# Claude Code session config:
+.claude/
+
+# ---- Editors & OS ----
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# ---- Local-only notebooks (personal learning material) ----
+notebooks/

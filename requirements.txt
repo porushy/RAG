@@ -1,0 +1,43 @@
+# Pinned to the exact versions this project was built and tested against.
+# Python 3.12. Install into a clean environment:
+#
+#     conda create -n rag python=3.12 -y
+#     conda activate rag
+#     pip install -r requirements.txt
+
+# --- PyTorch: GPU build ---------------------------------------------------
+# The +cu126 wheels ship kernels for sm_50 .. sm_90, which includes the Pascal
+# GTX 1060 (sm_61) this was developed on. They live on PyTorch's own index,
+# not PyPI, hence the extra index URL.
+#
+# CPU-only machines: delete the two lines below and use plain `torch==2.13.0`.
+# Nothing else in the project changes -- the embedding code already falls back.
+--extra-index-url https://download.pytorch.org/whl/cu126
+torch==2.13.0+cu126
+
+# --- LangChain (v1.x, LCEL style) ----------------------------------------
+langchain==1.3.15
+langchain-core==1.5.4
+langchain-community==0.4.2          # PyPDFLoader, FAISS vector store wrapper
+langchain-text-splitters==1.1.2     # RecursiveCharacterTextSplitter
+langchain-huggingface==1.2.2        # local sentence-transformers embeddings
+langchain-google-genai==4.3.3       # Gemini chat model
+
+# --- Retrieval stack ------------------------------------------------------
+sentence-transformers==5.7.0        # all-MiniLM-L6-v2 runs through this
+transformers==5.15.0
+faiss-cpu==1.15.0                   # vector index; CPU build is ample at this scale
+pypdf==6.16.0                       # PDF text extraction + page slicing
+
+# --- Runtime / notebook ---------------------------------------------------
+python-dotenv==1.2.2                # loads GOOGLE_API_KEY from .env
+jupyter==1.1.1
+ipykernel==7.3.0
+
+# --- Analysis of intermediate outputs -------------------------------------
+# Not in the original brief, but required to produce outputs the brief asks
+# for: the page-length distribution (Phase 2/3) and the hit@k sweep table
+# (Phase 8).
+numpy==2.5.2
+pandas==3.0.5
+matplotlib==3.11.1

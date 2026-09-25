@@ -1,7 +1,6 @@
 # Personal PDF Study Assistant (RAG)
 
-A retrieval-augmented generation pipeline over prose chapters of the India Economic
-Survey, built from scratch with LangChain (LCEL), local `all-MiniLM-L6-v2` embeddings,
+A retrieval-augmented generation pipeline over prose chapters of a policy document, built from scratch with LangChain (LCEL), local `all-MiniLM-L6-v2` embeddings,
 FAISS, and Gemini Flash.
 
 > **Status: Phase 0 (environment).** This README is a placeholder. The full write-up —

@@ -31,6 +31,9 @@ models/
 # the pattern. Comments must sit on their own line, as here.
 # The original project brief, kept local rather than published:
 prompt.md
+
+#my learning file
+learnings.md
 # Claude Code session config:
 .claude/
 

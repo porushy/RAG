@@ -4,7 +4,9 @@
 !.env.example
 
 # ---- Corpus: large, and redistribution is not ours to make ----
-data/
+# Ignore everything inside data/, but keep the empty folder via its .gitkeep.
+data/*
+!data/.gitkeep
 
 # ---- Generated artifacts: rebuildable from source, so not versioned ----
 faiss_index/

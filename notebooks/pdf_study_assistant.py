@@ -35,8 +35,9 @@ FIRST_PAGE_IN_ORIGINAL_PDF = 276  # first page of the slice in the full Survey (
 BOILERPLATE_THRESHOLD = 10  # a first line repeated on this many pages is a running head
 HEAD_LINES_TO_CHECK = 3  # running heads are only removed near the top of a page
 MINIMUM_LETTER_RATIO = 0.20  # lines below this are flattened chart data
-MINIMUM_PAGE_CHARACTERS = 200  # cleaned pages shorter than this are blank spacers
 
+# The notice printed on the spacer pages between chapters; only these pages are dropped.
+BLANK_PAGE_PATTERN = re.compile(r"\s*This page has been left blank\.?\s*", re.IGNORECASE)
 APPARATUS_PATTERN = re.compile(r"^\s*(?:Sources?|Notes?)\s*:", re.IGNORECASE)
 HYPHEN_LINEBREAK = re.compile(r"([A-Za-z])-[ \t]*\n[ \t]*([A-Za-z])")
 URL_PATTERN = re.compile(r"https?://\S+|www\.\S+")
@@ -153,12 +154,17 @@ def clean_page(text: str, heads: set[str]) -> str:
     return text
 
 
+def is_blank_spacer(text: str) -> bool:
+    """True only when the whole page is the 'This page has been left blank' notice."""
+    return BLANK_PAGE_PATTERN.fullmatch(text) is not None
+
+
 def clean_documents(pages: list[Document], heads: set[str]) -> tuple[list[Document], list[int]]:
-    """Clean every page; return the kept Documents and the indices of dropped pages."""
+    """Clean every page; return the kept Documents and the indices of dropped spacer pages."""
     cleaned, dropped = [], []
     for page_index, page in enumerate(pages):
         text = clean_page(page.page_content, heads)
-        if len(text) < MINIMUM_PAGE_CHARACTERS:
+        if is_blank_spacer(text):
             dropped.append(page_index)
             continue
         metadata = {

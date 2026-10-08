@@ -1,7 +1,7 @@
-"""Load, clean and save the Economic Survey chapters for the PDF study assistant.
+"""Load, clean, save and chunk the Economic Survey chapters for the PDF study assistant.
 
-Pipeline (Phases 1-3 of pdf_study_assistant.ipynb, which documents the evidence
-behind every rule below):
+Pipeline (Phases 1-3 of pdf_study_assistant.ipynb and Phase 4 of
+pdf_study_assistant_part2.ipynb, which document the evidence behind every rule below):
 
     1. Load the PDF one Document per page.
     2. Discover running heads and locate each page's footnote block.
@@ -10,6 +10,8 @@ behind every rule below):
     5. Join each chapter into one continuous text, recording where every page starts,
        so a chunk can span a page break and still be cited by its page range.
     6. Save pages and chapters as JSON Lines and verify the round trips.
+    7. Split each chapter into chunks (1,000 characters, up to 200 overlap) and give
+       every chunk the page range its text came from.
 
 Usage (from the project root or from notebooks/):
 
@@ -28,6 +30,7 @@ from pathlib import Path
 
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_core.documents import Document
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +44,8 @@ FIRST_PAGE_IN_ORIGINAL_PDF = 276  # first page of the slice in the full Survey (
 BOILERPLATE_THRESHOLD = 10  # a first line repeated on this many pages is a running head
 HEAD_LINES_TO_CHECK = 3  # running heads are only removed near the top of a page
 MINIMUM_LETTER_RATIO = 0.20  # lines below this are flattened chart data
+CHUNK_SIZE = 1000  # maximum characters per chunk
+CHUNK_OVERLAP = 200  # at most this many characters repeated from the previous chunk
 
 # The notice printed on the spacer pages between chapters; only these pages are dropped.
 BLANK_PAGE_PATTERN = re.compile(r"\s*This page has been left blank\.?\s*", re.IGNORECASE)
@@ -48,6 +53,10 @@ BLANK_PAGE_PATTERN = re.compile(r"\s*This page has been left blank\.?\s*", re.IG
 FOOTNOTE_LINE = re.compile(r"^\s*(\d{1,3})\s+\S")
 # Chapter-opening pages; footnote numbering restarts there.
 CHAPTER_START = re.compile(r"^\s*CHAPTER", re.MULTILINE)
+# Footnote-block safeguards: blocks sit at the page foot (longest real block: 19 lines),
+# and no numbered body paragraph ever follows them.
+MAX_LINES_FROM_BOTTOM = 25
+PARAGRAPH_NUMBER_LINE = re.compile(r"^\s*(?:6|7|8|9|10)\.\d{1,3}\.?\s")
 APPARATUS_PATTERN = re.compile(r"^\s*(?:Sources?|Notes?)\s*:", re.IGNORECASE)
 HYPHEN_LINEBREAK = re.compile(r"([A-Za-z])-[ \t]*\n[ \t]*([A-Za-z])")
 URL_PATTERN = re.compile(r"https?://\S+|www\.\S+")
@@ -105,12 +114,23 @@ def footnote_number(line: str) -> int | None:
     return int(match.group(1)) if match else None
 
 
+def is_near_bottom(lines: list[str], line_index: int) -> bool:
+    """True if the line is within MAX_LINES_FROM_BOTTOM lines of the end of the page."""
+    return len(lines) - line_index <= MAX_LINES_FROM_BOTTOM
+
+
+def has_clean_tail(lines: list[str], line_index: int) -> bool:
+    """True if no paragraph-numbered body line comes after this line."""
+    return not any(PARAGRAPH_NUMBER_LINE.match(line) for line in lines[line_index + 1:])
+
+
 def find_footnote_blocks(pages: list[Document]) -> dict[int, tuple[int, int, int]]:
     """Locate each page's footnote block by following the document's footnote numbering.
 
     A block must start with exactly the next expected footnote number (numbering
-    restarts at each chapter); body lines or chart values that merely start with a
-    number are therefore not mistaken for footnotes.
+    restarts at each chapter), near the bottom of the page, with no numbered body
+    paragraph after it; body lines or chart values that merely start with a number
+    are therefore not mistaken for footnotes.
 
     Returns {page_index: (first_line_index, first_number, last_number)}.
     """
@@ -120,7 +140,13 @@ def find_footnote_blocks(pages: list[Document]) -> dict[int, tuple[int, int, int
         lines = page.page_content.splitlines()
         if CHAPTER_START.search("\n".join(lines[:4])):
             expected_number = 1
-        candidates = [index for index, line in enumerate(lines) if footnote_number(line) == expected_number]
+        candidates = [
+            index
+            for index, line in enumerate(lines)
+            if footnote_number(line) == expected_number
+            and is_near_bottom(lines, index)
+            and has_clean_tail(lines, index)
+        ]
         if not candidates:
             continue
         first_line = candidates[-1]
@@ -300,12 +326,63 @@ def build_chapter_documents(documents: list[Document]) -> list[Document]:
     return chapter_documents
 
 
-def pages_of_span(chapter_metadata: dict, start: int, end: int) -> list[int]:
-    """Page numbers covered by characters start..end of a chapter text."""
-    page_starts = chapter_metadata["page_starts"]
+def page_positions_of_span(page_starts: list[int], start: int, end: int) -> tuple[int, int]:
+    """Positions (in a chapter's page lists) of the first and last page covering start..end."""
     first = bisect.bisect_right(page_starts, start) - 1
     last = bisect.bisect_right(page_starts, end - 1) - 1
-    return chapter_metadata["page_numbers"][first : last + 1]
+    return first, last
+
+
+# -------------------------------------------------------------------------- chunking
+
+
+def chunk_chapters(
+    chapters: list[Document], chunk_size: int = CHUNK_SIZE, chunk_overlap: int = CHUNK_OVERLAP
+) -> list[Document]:
+    """Split each chapter text into chunks and label every chunk with the pages it covers.
+
+    Chapters are split as continuous texts, so a chunk can span a page break; its
+    metadata then lists both pages.
+    """
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=chunk_size, chunk_overlap=chunk_overlap, add_start_index=True
+    )
+    chunks = []
+    for chapter_number, chapter in enumerate(chapters, start=1):
+        chapter_metadata = chapter.metadata
+        for chunk in splitter.split_documents([chapter]):
+            start = chunk.metadata["start_index"]
+            end = start + len(chunk.page_content)
+            if chapter.page_content[start:end] != chunk.page_content:
+                raise ValueError(f"Chunk not found at its start_index {start} in chapter {chapter_number}")
+            first, last = page_positions_of_span(chapter_metadata["page_starts"], start, end)
+            chunk.metadata = {
+                "source": chapter_metadata["source"],
+                "chapter_number": chapter_number,
+                "start_index": start,
+                "page_numbers": chapter_metadata["page_numbers"][first : last + 1],
+                "page_labels": chapter_metadata["page_labels"][first : last + 1],
+                "original_pages": chapter_metadata["original_pages"][first : last + 1],
+            }
+            chunks.append(chunk)
+    return chunks
+
+
+def count_spanned_page_breaks(chapters: list[Document], chunks: list[Document]) -> tuple[int, int]:
+    """Count page breaks inside a paragraph, and how many of them some chunk spans."""
+    breaks = spanned = 0
+    for chapter_number, chapter in enumerate(chapters, start=1):
+        spans = [
+            (chunk.metadata["start_index"], chunk.metadata["start_index"] + len(chunk.page_content))
+            for chunk in chunks
+            if chunk.metadata["chapter_number"] == chapter_number
+        ]
+        for page_start in chapter.metadata["page_starts"][1:]:
+            if chapter.page_content[page_start - 1] != " ":
+                continue  # joined with a blank line: no paragraph crosses this break
+            breaks += 1
+            spanned += any(start < page_start - 1 and end > page_start for start, end in spans)
+    return breaks, spanned
 
 
 # ----------------------------------------------------------------------- persistence
@@ -373,6 +450,12 @@ def main(argv: list[str] | None = None) -> None:
 
     save_documents(documents, args.output_dir / PAGES_FILENAME)
     save_documents(chapters, args.output_dir / CHAPTERS_FILENAME)
+
+    chunks = chunk_chapters(chapters)
+    two_page_chunks = sum(len(chunk.metadata["page_numbers"]) > 1 for chunk in chunks)
+    breaks, spanned = count_spanned_page_breaks(chapters, chunks)
+    logger.info("Split into %d chunks (%d span two pages)", len(chunks), two_page_chunks)
+    logger.info("Paragraphs crossing a page break: %d; spanned by a chunk: %d", breaks, spanned)
 
 
 if __name__ == "__main__":

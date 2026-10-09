@@ -5,7 +5,8 @@ pdf_study_assistant_part2.ipynb, which document the evidence behind every rule b
 
     1. Load the PDF one Document per page.
     2. Discover running heads and locate each page's footnote block.
-    3. Clean each page (footnotes + eight ordered steps) and drop blank spacer pages.
+    3. Clean each page (footnotes + nine ordered steps, ending with one sentence per
+       line) and drop blank spacer pages.
     4. Flag pages that continue a paragraph broken off by the previous page.
     5. Join each chapter into one continuous text, recording where every page starts,
        so a chunk can span a page break and still be cited by its page range.
@@ -65,6 +66,9 @@ FOOTNOTE_AFTER_WORD = re.compile(r"(?<=[a-z])\.\d{1,2}(?=\s+[A-Z])")
 FOOTNOTE_AFTER_YEAR = re.compile(r"(?<=\d{4})\.\d{1,2}(?=\s+[A-Z])")
 # The document's own paragraph numbers: chapters 6-10, followed by text.
 PARAGRAPH_MARKER = re.compile(r"(?m)^[ \t]*((?:6|7|8|9|10)\.\d{1,3})\.?[ \t]+(?=[A-Za-z(])")
+# A full stop followed by spaces ends a sentence; decimals (5.6) and paragraph numbers
+# (8.44) have no space after the dot, so they never match.
+SENTENCE_BREAK = re.compile(r"\. +")
 # A finished sentence, allowing closing quotes/brackets and a leftover footnote number.
 SENTENCE_END = re.compile(r"[.?!:;][”’\")]*\d{0,3}$")
 # Ways a page can open a new block instead of continuing a paragraph.
@@ -234,8 +238,13 @@ def collapse_whitespace(text: str) -> str:
     return "\n\n".join(paragraph for paragraph in paragraphs if paragraph)
 
 
+def break_sentences(text: str) -> str:
+    """Start a new line after every sentence-ending full stop, so chunking can cut there."""
+    return SENTENCE_BREAK.sub(".\n", text)
+
+
 def clean_page(text: str, heads: set[str], footnote_block: tuple[int, int, int] | None = None) -> str:
-    """Run Step 0 and the eight cleaning steps. The order matters."""
+    """Run cleaning Steps 0-9. The order matters."""
     text = remove_footnote_block(text, footnote_block)  # 0  needs the original line layout
     text = remove_running_heads(text, heads)  # 1
     text = remove_junk_lines(text)  # 2  must precede 7: removes chart values shaped like markers
@@ -245,6 +254,7 @@ def clean_page(text: str, heads: set[str], footnote_block: tuple[int, int, int] 
     text = repair_footnote_markers(text)  # 6
     text = mark_paragraphs(text)  # 7
     text = collapse_whitespace(text)  # 8
+    text = break_sentences(text)  # 9  must follow 8, which turns line breaks into spaces
     return text
 
 

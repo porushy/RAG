@@ -10,10 +10,12 @@ every step below):
        so that inner product equals cosine similarity.
     4. Load the FAISS index from disk, or build and save it if it is missing.
     5. Verify the index against the chunks in memory.
+    6. Optionally answer --question with the top-k chunks, their cosine scores and pages
+       (retrieval only, no LLM; Phase 6).
 
 Usage (from the project root or from notebooks/):
 
-    python notebooks/pdf_study_assistant_2.py [--chapters PATH] [--index-dir DIR]
+    python notebooks/pdf_study_assistant_2.py [--chapters PATH] [--index-dir DIR] [--question TEXT ...] [--k K]
 """
 
 from __future__ import annotations
@@ -29,6 +31,7 @@ import torch
 from langchain_community.vectorstores import FAISS
 from langchain_community.vectorstores.utils import DistanceStrategy
 from langchain_core.documents import Document
+from langchain_core.vectorstores import VectorStoreRetriever
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
@@ -45,6 +48,7 @@ EMBEDDING_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 # Unit vectors: inner product = cosine similarity. LangChain's default is Euclidean, and
 # the saved index does not record the strategy, so it is passed on build and on load.
 DISTANCE_STRATEGY = DistanceStrategy.MAX_INNER_PRODUCT
+TOP_K = 5  # chunks returned per question
 
 
 # -------------------------------------------------------------------------- chunking
@@ -204,6 +208,38 @@ def verify_index(index_dir: Path, chunks: list[Document], embedding_model: Huggi
     )
 
 
+# ------------------------------------------------------------------------- retrieval
+
+
+def make_retriever(vector_store: FAISS, k: int = TOP_K) -> VectorStoreRetriever:
+    """Top-k similarity retriever: a Runnable for the Phase 7 chain."""
+    return vector_store.as_retriever(search_type="similarity", search_kwargs={"k": k})
+
+
+def retrieve_with_scores(vector_store: FAISS, question: str, k: int = TOP_K) -> list[tuple[Document, float]]:
+    """The retriever's top-k chunks with their cosine similarity, best first.
+
+    Uses the raw inner-product score: LangChain's relevance scores report 1 - cosine
+    for an inner-product index, so they rank the best chunk lowest.
+    """
+    return [(chunk, float(score)) for chunk, score in vector_store.similarity_search_with_score(question, k=k)]
+
+
+def log_retrieval(vector_store: FAISS, question: str, k: int = TOP_K, preview_characters: int = 150) -> None:
+    """Log the top-k chunks for a question with score, chapter, pages and a text preview."""
+    logger.info("\nQUESTION: %s", question)
+    for rank, (chunk, score) in enumerate(retrieve_with_scores(vector_store, question, k), start=1):
+        preview = chunk.page_content[:preview_characters].replace("\n", " ")
+        logger.info(
+            "  %d. score %.3f | chapter %d | pages %s | %s ...",
+            rank,
+            score,
+            chunk.metadata["chapter_number"],
+            chunk.metadata["page_numbers"],
+            preview,
+        )
+
+
 # ------------------------------------------------------------------------------ main
 
 
@@ -211,6 +247,8 @@ def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--chapters", type=Path, default=DEFAULT_CHAPTERS_PATH, help="chapters JSONL file")
     parser.add_argument("--index-dir", type=Path, default=DEFAULT_INDEX_DIR, help="folder for the FAISS index")
+    parser.add_argument("--question", action="append", default=[], help="question to retrieve chunks for (repeatable)")
+    parser.add_argument("--k", type=int, default=TOP_K, help="chunks to retrieve per question")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.WARNING, format="%(message)s")  # quiet HTTP and FAISS loader logs
     logger.setLevel(logging.INFO)
@@ -230,7 +268,7 @@ def main(argv: list[str] | None = None) -> None:
     logger.info("Chunks over the model's token limit (end truncated): %d %s", len(truncated), truncated)
 
     start_time = time.perf_counter()
-    _, built = build_or_load_index(chunks, embedding_model, args.index_dir)
+    vector_store, built = build_or_load_index(chunks, embedding_model, args.index_dir)
     logger.info(
         "Index %s in %.1f s: %s",
         "built and saved" if built else "loaded from disk",
@@ -238,6 +276,9 @@ def main(argv: list[str] | None = None) -> None:
         args.index_dir,
     )
     verify_index(args.index_dir, chunks, embedding_model)
+
+    for question in args.question:
+        log_retrieval(vector_store, question, args.k)
 
 
 if __name__ == "__main__":

@@ -139,6 +139,7 @@ question.
 
 ```text
 ├── rag_utils.py              # all pipeline functions, by phase (cleaning → evaluation)
+├── app.py                    # chat web interface (Gradio) with page links into the PDF
 ├── download_data.py          # Phase 1: fetch the Survey, slice pages 276–468
 ├── check_setup.py            # GPU check, live Gemini model list, one test call
 ├── notebooks/
@@ -203,6 +204,30 @@ print(result["answer"])                 # ... over 1,700 GCCs ... [pp. 55-56]
 Use `rag.make_gemini_llm()` instead for Gemini. The first run downloads the embedding model
 (~90 MB) and builds the index in a few seconds. Later runs load it from `faiss_index/` and check
 that it still matches the chunks.
+
+## Web interface
+
+A chat-style interface, built with Gradio:
+
+```bash
+python app.py        # then open http://127.0.0.1:7860
+```
+
+- **Ask a question, choose a model.** The models are Qwen 3.8 27B (default), GPT OSS 120B and
+  GPT OSS 20B on Groq, or Gemini 3.7 Flash. Each question is answered on its own, from the
+  document only.
+- **Every citation is a link into the PDF.** It opens `survey_chapters.pdf` at the cited page
+  in the browser's built-in viewer (`#page=N`). The five source passages the model was given
+  are listed underneath, each with its own page link.
+- **One PDF window, reused.** All page links open in a single named browser window
+  (`window.open(url, "survey_pdf")`). The first click opens it; later clicks move that same
+  window to the new page instead of opening another one. Browsers may not bring the window to
+  the front on their own: switch to it and it will already be on the right page.
+- **Provider errors stay in the chat.** A used-up quota or an overloaded server shows a message
+  suggesting another model, instead of breaking the page.
+
+The app needs `data/survey_chapters.pdf` (from `download_data.py`) and `GROQ_API_KEY` in `.env`
+(plus `GOOGLE_API_KEY` for Gemini).
 
 ## License
 

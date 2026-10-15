@@ -18,6 +18,20 @@ Q: What is the RBI's current repo rate?
 A: The document does not contain this information.
 ```
 
+## Quick start
+
+```bash
+conda create -n rag python=3.12 -y && conda activate rag
+pip install -r requirements.txt
+cp .env.example .env                       # Windows: copy .env.example .env  — then add GROQ_API_KEY
+python download_data.py                    # fetch the Survey and slice the 5 chapters (once)
+python notebooks/pdf_study_assistant_1.py  # clean the text and save it (once)
+python app.py                              # open http://127.0.0.1:7860 and ask a question
+```
+
+The first `app.py` run downloads the embedding model (~90 MB) and builds the search index (a few
+seconds); later runs reuse both. Details are in [Setup](#setup) and [Run](#run) below.
+
 ---
 
 ## The problem
@@ -194,29 +208,54 @@ conda create -n rag python=3.12 -y
 conda activate rag
 pip install -r requirements.txt     # CPU-only machine: see the comment at the top of the file
 
-cp .env.example .env                # then add your key(s), see below
-python check_setup.py               # GPU check, live Gemini models, one test call
+cp .env.example .env                # Windows: copy .env.example .env — then add your key(s), see below
+python check_setup.py               # optional: GPU check, live Gemini models, one test call
 ```
 
-API keys go in `.env`, which is gitignored:
+API keys go in `.env`, which is gitignored. You need **at least one**:
 
+- `GROQ_API_KEY`: GPT OSS / Qwen on Groq, free at <https://console.groq.com> (API Keys → Create
+  API Key). 1,000 requests per day and 8,000 tokens per minute per model. **Required for the web
+  interface.**
 - `GOOGLE_API_KEY`: Gemini, free at <https://aistudio.google.com/apikey>. The free tier is about
-  20 requests per day per model.
-- `GROQ_API_KEY` (optional): GPT OSS / Qwen on Groq, free at <https://console.groq.com>. 1,000
-  requests per day and 8,000 tokens per minute per model.
+  20 requests per day per model. Used by `pdf_study_assistant_3.py` and the Gemini option in the
+  web interface.
 
 ## Run
 
+All commands run from the project root with the `rag` environment active.
+
+**1. Get the document (once).** Downloads the Economic Survey from indiabudget.gov.in and keeps
+the five chapters (pages 276–468) as `data/survey_chapters.pdf`:
+
 ```bash
-python download_data.py                          # Phase 1: data/survey_chapters.pdf (193 pages)
-python notebooks/pdf_study_assistant_1.py        # Phases 2–3: data/processed/*.jsonl
-python notebooks/pdf_study_assistant_2.py \
-    --question "How many greenfield airports are operational?"   # Phases 4–6: index + retrieval only
-python notebooks/pdf_study_assistant_3.py \
-    --question "What was India's share in global services trade in 2024?"   # Phase 7: cited answer
+python download_data.py
 ```
 
-Or from Python:
+**2. Clean it (once, or after changing the cleaning rules).** Writes the cleaned pages and chapters
+to `data/processed/`:
+
+```bash
+python notebooks/pdf_study_assistant_1.py
+```
+
+**3. Ask questions**, in any of three ways:
+
+```bash
+# a) the web interface (recommended)
+python app.py                                    # then open http://127.0.0.1:7860
+
+# b) retrieval only, no LLM: which passages would be used? Also builds faiss_index/ on first run
+python notebooks/pdf_study_assistant_2.py --question "How many greenfield airports are operational?"
+
+# c) a cited answer from Gemini in the terminal
+python notebooks/pdf_study_assistant_3.py --question "What was India's share in global services trade in 2024?"
+```
+
+Stop the web interface with `Ctrl+C`. If the cleaning rules or chunk settings change, delete
+`faiss_index/`: the next run rebuilds it. A stale index is detected and reported, not used silently.
+
+**From Python**, the same pipeline is available as functions:
 
 ```python
 import rag_utils as rag
@@ -225,7 +264,8 @@ rag.prepare_corpus()                    # PDF -> cleaned pages and chapters (onc
 stack = rag.load_retriever()            # chunks, embeddings, FAISS index (built once, then loaded)
 
 rag.load_api_key("GROQ_API_KEY")
-chain = rag.build_rag_chain_with_sources(stack.retriever, rag.make_groq_llm_with_fallback())
+hybrid = rag.make_hybrid_retriever(stack.retriever, rag.make_bm25_retriever(stack.chunks))
+chain = rag.build_rag_chain_with_sources(hybrid, rag.make_groq_llm_with_fallback())
 result = rag.invoke_with_backoff(chain, "How many Global Capability Centres does India host?")
 print(result["answer"])                 # ... over 1,700 GCCs ... [pp. 55-56]
 ```

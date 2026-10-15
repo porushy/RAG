@@ -42,7 +42,11 @@ GEMINI_MODEL = "gemini-3.7-flash"
 RETRYABLE_STATUS_CODES = {429, 503}  # too many requests; server overloaded
 MAX_WAIT_SECONDS = 60  # a longer suggested wait means a daily quota: retrying cannot help
 NOT_IN_DOCUMENT = "The document does not contain this information."
-CITATION_PATTERN = re.compile(r"\[pp?\. (\d+)(?:-(\d+))?\]")  # [p. 22] or [pp. 55-56]
+# Citations are read tolerantly (other models write "[Source 1 | p. 55]", "【p. 129】", odd dashes);
+# whether they use the exact requested form is reported separately.
+BRACKETED = re.compile(r"[\[【]([^\]】]*)[\]】]")
+PAGE_REFERENCE = re.compile(r"pp?\.\s*(\d+)(?:\s*[-‐‑–—]\s*(\d+))?")
+REQUIRED_FORM = re.compile(r"\[pp?\. \d+(?:-\d+)?\]")
 
 SYSTEM_INSTRUCTIONS = f"""You are a study assistant for chapters of India's Economic Survey.
 Answer the question using ONLY the numbered sources in the context.
@@ -159,12 +163,25 @@ def build_rag_chain_with_sources(retriever: Runnable, llm: Runnable) -> Runnable
     )
 
 
+def cited_pages_of(answer: str) -> set[int]:
+    """Every page cited in the answer, however the citation is spelled."""
+    pages = set()
+    for inside in BRACKETED.findall(answer):
+        for first, last in PAGE_REFERENCE.findall(inside):
+            pages.update(range(int(first), int(last or first) + 1))
+    return pages
+
+
+def uses_required_form(answer: str) -> bool:
+    """True if the answer has citations and every one is written exactly as [p. N] or [pp. N-M]."""
+    citations = [match.group(0) for match in BRACKETED.finditer(answer) if PAGE_REFERENCE.search(match.group(1))]
+    return bool(citations) and all(REQUIRED_FORM.fullmatch(citation) for citation in citations)
+
+
 def unsupported_citations(answer: str, source_chunks) -> tuple[set[int], set[int]]:
     """Pages cited in the answer, and those among them that no source chunk covers."""
     supplied = {page for chunk in source_chunks for page in chunk.metadata["page_numbers"]}
-    cited = set()
-    for first, last in CITATION_PATTERN.findall(answer):
-        cited.update(range(int(first), int(last or first) + 1))
+    cited = cited_pages_of(answer)
     return cited, cited - supplied
 
 
@@ -198,9 +215,12 @@ def main(argv: list[str] | None = None) -> None:
                         chunk.page_content[:80].replace("\n", " "))
         if answer.strip() == NOT_IN_DOCUMENT:
             logger.info("CHECK   : the model says the document does not contain the answer")
+        elif not cited:
+            logger.info("CHECK   : WARNING: the answer cites no page at all")
         else:
-            logger.info("CHECK   : cited pages %s; all among the sources: %s%s", sorted(cited), not unsupported,
-                        f" (unsupported: {sorted(unsupported)})" if unsupported else "")
+            logger.info("CHECK   : cited pages %s; all among the sources: %s%s; exact [p. N] form: %s",
+                        sorted(cited), not unsupported,
+                        f" (unsupported: {sorted(unsupported)})" if unsupported else "", uses_required_form(answer))
 
 
 if __name__ == "__main__":

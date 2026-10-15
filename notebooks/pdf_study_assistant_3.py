@@ -1,16 +1,17 @@
 """Answer questions about the Economic Survey chapters with a cited, grounded LLM answer.
 
-Pipeline (Phase 7 of pdf_study_assistant_part3.ipynb, which explains every step below):
+Pipeline (Phase 7 of pdf_study_assistant_part3.ipynb, which explains every step; the
+functions themselves live in rag_utils.py):
 
-    1. Rebuild the retriever from Phases 4-6 (pdf_study_assistant_2.py).
+    1. Rebuild the retriever from Phases 4-6.
     2. Format the retrieved chunks as numbered sources headed by their pages.
     3. Ask Gemini, through an LCEL chain, to answer only from those sources, citing pages,
        or to say the document does not contain the answer.
     4. Retry on HTTP 429/503 with exponential backoff; stop at once on a daily quota.
     5. Check that every cited page was among the pages supplied.
 
-All LLM calls live in this file, so the model or provider can change without touching
-the retrieval code. Needs GOOGLE_API_KEY in the project's .env.
+All LLM calls happen here, so the model or provider can change without touching the
+retrieval code. Needs GOOGLE_API_KEY in the project's .env.
 
 Usage (from the project root or from notebooks/):
 
@@ -21,189 +22,45 @@ from __future__ import annotations
 
 import argparse
 import logging
-import os
-import random
-import re
-import time
+import sys
+from pathlib import Path
 
-from dotenv import load_dotenv
-from langchain_core.output_parsers import StrOutputParser
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.runnables import Runnable, RunnableParallel, RunnablePassthrough
-from langchain_google_genai import ChatGoogleGenerativeAI
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # rag_utils.py is in the project root
 
-import pdf_study_assistant_1 as cleaning
-import pdf_study_assistant_2 as pipeline
+# Some names are not used below but re-exported, for code that imported them from this module.
+from rag_utils import (  # noqa: E402
+    GEMINI_MODEL,
+    NOT_IN_DOCUMENT,
+    TOP_K,
+    build_rag_chain,
+    build_rag_chain_with_sources,
+    cited_pages_of,
+    format_docs,
+    invoke_with_backoff,
+    load_api_key,
+    load_retriever,
+    page_reference,
+    unsupported_citations,
+    uses_required_form,
+)
+from rag_utils import make_gemini_llm as make_llm  # noqa: E402
 
 logger = logging.getLogger(__name__)
-
-# gemini-3.8-flash allows 20 free requests a day; 3.7-flash has its own quota (checked 2026-10-13).
-GEMINI_MODEL = "gemini-3.7-flash"
-RETRYABLE_STATUS_CODES = {429, 503}  # too many requests; server overloaded
-MAX_WAIT_SECONDS = 60  # a longer suggested wait means a daily quota: retrying cannot help
-NOT_IN_DOCUMENT = "The document does not contain this information."
-# Citations are read tolerantly (other models write "[Source 1 | p. 55]", "【p. 129】", odd dashes);
-# whether they use the exact requested form is reported separately.
-BRACKETED = re.compile(r"[\[【]([^\]】]*)[\]】]")
-PAGE_REFERENCE = re.compile(r"pp?\.\s*(\d+)(?:\s*[-‐‑–—]\s*(\d+))?")
-REQUIRED_FORM = re.compile(r"\[pp?\. \d+(?:-\d+)?\]")
-
-SYSTEM_INSTRUCTIONS = f"""You are a study assistant for chapters of India's Economic Survey.
-Answer the question using ONLY the numbered sources in the context.
-- Do not use any knowledge from outside the context, even if you know the answer.
-- After each fact, cite the page it came from in square brackets, exactly as written in the
-  source header, for example [p. 55] or [pp. 55-56].
-- If the context does not contain the answer, reply with exactly this sentence and nothing
-  else: "{NOT_IN_DOCUMENT}"
-- Keep the answer short: a few sentences."""
-
-
-# ------------------------------------------------------------------------------- LLM
-
-
-def load_api_key() -> None:
-    """Load GOOGLE_API_KEY from the project's .env into the environment, or fail clearly."""
-    load_dotenv(cleaning.PROJECT_ROOT / ".env")
-    key = os.environ.get("GOOGLE_API_KEY", "").strip()
-    if not key or key == "your-key-here":
-        raise RuntimeError(f"GOOGLE_API_KEY is missing. Copy .env.example to .env in {cleaning.PROJECT_ROOT}.")
-
-
-def make_llm(model: str = GEMINI_MODEL) -> ChatGoogleGenerativeAI:
-    """Gemini chat model: deterministic, no reasoning pass, one attempt (we retry ourselves)."""
-    return ChatGoogleGenerativeAI(model=model, temperature=0, thinking_budget=0, max_retries=1)
-
-
-def http_status_of(error: BaseException | None) -> int | None:
-    """The HTTP status code carried by an error or by any error it was raised from."""
-    while error is not None:
-        code = getattr(error, "code", None)
-        if isinstance(code, int):
-            return code
-        error = error.__cause__
-    return None
-
-
-def suggested_wait_of(error: BaseException | None) -> float | None:
-    """Seconds Google asks us to wait before retrying (its RetryInfo entry), else None."""
-    while error is not None:
-        details = getattr(error, "details", None)
-        if isinstance(details, dict):
-            for entry in details.get("error", {}).get("details", []):
-                if entry.get("@type", "").endswith("RetryInfo"):
-                    return float(entry["retryDelay"].rstrip("s"))
-        error = error.__cause__
-    return None
-
-
-def invoke_with_backoff(runnable: Runnable, chain_input, max_attempts: int = 6, initial_delay_seconds: float = 2.0):
-    """Invoke a Runnable, retrying on HTTP 429/503 with exponentially growing, jittered waits."""
-    for attempt in range(1, max_attempts + 1):
-        try:
-            return runnable.invoke(chain_input)
-        except Exception as error:
-            status = http_status_of(error)
-            if status not in RETRYABLE_STATUS_CODES or attempt == max_attempts:
-                raise
-            suggested = suggested_wait_of(error)
-            if suggested is not None and suggested > MAX_WAIT_SECONDS:
-                raise RuntimeError(
-                    f"HTTP {status}: Google asks us to wait {suggested / 3600:.1f} hours. The daily "
-                    "free-tier quota for this model is used up; try again after it resets."
-                ) from error
-            delay = max(initial_delay_seconds * 2 ** (attempt - 1), suggested or 0) + random.uniform(0, 1)
-            logger.info("HTTP %s on attempt %d; waiting %.1f s before retrying", status, attempt, delay)
-            time.sleep(delay)
-
-
-# --------------------------------------------------------------------------- the chain
-
-
-def page_reference(page_numbers: list[int]) -> str:
-    """Citation label for a chunk's pages: [22] -> 'p. 22', [55, 56] -> 'pp. 55-56'."""
-    if len(page_numbers) == 1:
-        return f"p. {page_numbers[0]}"
-    return f"pp. {page_numbers[0]}-{page_numbers[-1]}"
-
-
-def format_docs(chunks) -> str:
-    """Join retrieved chunks into one context string, each headed by its source number and pages."""
-    return "\n\n".join(
-        f"[Source {number} | {page_reference(chunk.metadata['page_numbers'])}]\n{chunk.page_content}"
-        for number, chunk in enumerate(chunks, start=1)
-    )
-
-
-def make_prompt() -> ChatPromptTemplate:
-    return ChatPromptTemplate.from_messages(
-        [("system", SYSTEM_INSTRUCTIONS), ("human", "Context:\n\n{context}\n\nQuestion: {question}")]
-    )
-
-
-def build_rag_chain(retriever: Runnable, llm: Runnable) -> Runnable:
-    """question -> answer text (the brief's LCEL chain)."""
-    return (
-        {"context": retriever | format_docs, "question": RunnablePassthrough()}
-        | make_prompt()
-        | llm
-        | StrOutputParser()
-    )
-
-
-def build_rag_chain_with_sources(retriever: Runnable, llm: Runnable) -> Runnable:
-    """question -> {"source_documents", "question", "answer"}; the retriever runs once."""
-    answer_from_sources = (
-        RunnablePassthrough.assign(context=lambda inputs: format_docs(inputs["source_documents"]))
-        | make_prompt()
-        | llm
-        | StrOutputParser()
-    )
-    return RunnableParallel(source_documents=retriever, question=RunnablePassthrough()).assign(
-        answer=answer_from_sources
-    )
-
-
-def cited_pages_of(answer: str) -> set[int]:
-    """Every page cited in the answer, however the citation is spelled."""
-    pages = set()
-    for inside in BRACKETED.findall(answer):
-        for first, last in PAGE_REFERENCE.findall(inside):
-            pages.update(range(int(first), int(last or first) + 1))
-    return pages
-
-
-def uses_required_form(answer: str) -> bool:
-    """True if the answer has citations and every one is written exactly as [p. N] or [pp. N-M]."""
-    citations = [match.group(0) for match in BRACKETED.finditer(answer) if PAGE_REFERENCE.search(match.group(1))]
-    return bool(citations) and all(REQUIRED_FORM.fullmatch(citation) for citation in citations)
-
-
-def unsupported_citations(answer: str, source_chunks) -> tuple[set[int], set[int]]:
-    """Pages cited in the answer, and those among them that no source chunk covers."""
-    supplied = {page for chunk in source_chunks for page in chunk.metadata["page_numbers"]}
-    cited = cited_pages_of(answer)
-    return cited, cited - supplied
-
-
-# ------------------------------------------------------------------------------ main
 
 
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--question", action="append", required=True, help="question to answer (repeatable)")
     parser.add_argument("--model", default=GEMINI_MODEL, help="Gemini model ID")
-    parser.add_argument("--k", type=int, default=pipeline.TOP_K, help="chunks retrieved per question")
+    parser.add_argument("--k", type=int, default=TOP_K, help="chunks retrieved per question")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.WARNING, format="%(message)s")  # quiet HTTP and FAISS loader logs
-    logger.setLevel(logging.INFO)
+    for name in (__name__, "rag_utils"):
+        logging.getLogger(name).setLevel(logging.INFO)
 
-    load_api_key()
-    chapters = cleaning.load_documents(cleaning.DEFAULT_OUTPUT_DIR / cleaning.CHAPTERS_FILENAME)
-    chunks = pipeline.chunk_chapters(chapters)
-    embedding_model = pipeline.load_embedding_model()
-    vector_store, _ = pipeline.build_or_load_index(chunks, embedding_model, pipeline.DEFAULT_INDEX_DIR)
-    pipeline.verify_index(pipeline.DEFAULT_INDEX_DIR, chunks, embedding_model)
-    chain = build_rag_chain_with_sources(pipeline.make_retriever(vector_store, args.k), make_llm(args.model))
+    load_api_key("GOOGLE_API_KEY")
+    stack = load_retriever(k=args.k)
+    chain = build_rag_chain_with_sources(stack.retriever, make_llm(args.model))
 
     for question in args.question:
         result = invoke_with_backoff(chain, question)

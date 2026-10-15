@@ -103,7 +103,7 @@ class Assistant:
 
     def __init__(self):
         rag.load_api_key("GROQ_API_KEY")
-        self.stack = rag.load_retriever()
+        self.stack = rag.load_retriever(check_vectors=False)  # quick start: texts and metadata only
         self.retrievers = {
             "dense": self.stack.retriever,
             "hybrid": rag.make_hybrid_retriever(self.stack.retriever, rag.make_bm25_retriever(self.stack.chunks)),

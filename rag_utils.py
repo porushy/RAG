@@ -484,13 +484,23 @@ def count_spanned_page_breaks(chapters: list[Document], chunks: list[Document]) 
 
 
 def load_embedding_model(model_name: str = EMBEDDING_MODEL_NAME) -> HuggingFaceEmbeddings:
-    """Load the sentence-transformers model on the GPU if available, else the CPU."""
+    """Load the sentence-transformers model on the GPU if available, else the CPU.
+
+    The copy saved on disk is used without asking the Hugging Face Hub whether the files
+    changed (those checks took ~7 s per start); the model is downloaded only if it is missing.
+    """
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    embedding_model = HuggingFaceEmbeddings(
-        model_name=model_name,
-        model_kwargs={"device": device},
-        encode_kwargs={"normalize_embeddings": True},
-    )
+    encode_kwargs = {"normalize_embeddings": True}
+    try:
+        embedding_model = HuggingFaceEmbeddings(
+            model_name=model_name,
+            model_kwargs={"device": device, "local_files_only": True},
+            encode_kwargs=encode_kwargs,
+        )
+    except OSError:  # not on disk yet (first run on this machine): download it
+        embedding_model = HuggingFaceEmbeddings(
+            model_name=model_name, model_kwargs={"device": device}, encode_kwargs=encode_kwargs
+        )
     logger.info("Loaded %s on %s", model_name, device)
     return embedding_model
 
@@ -530,11 +540,15 @@ def build_or_load_index(
     return vector_store, True
 
 
-def verify_index(index_dir: Path, chunks: list[Document], embedding_model: HuggingFaceEmbeddings) -> None:
+def verify_index(
+    index_dir: Path, chunks: list[Document], embedding_model: HuggingFaceEmbeddings, check_vectors: bool = True
+) -> None:
     """Reload the saved index and check it matches the chunks in memory.
 
     A mismatch means the index on disk was built from older chunks (it is loaded
-    whenever it exists), so the caller must delete it and rebuild.
+    whenever it exists), so the caller must delete it and rebuild. The texts and metadata
+    are always compared; check_vectors=False skips re-embedding every chunk to compare the
+    vectors too (about 2 s on a GPU), for interactive start-up.
     """
     reloaded_store = FAISS.load_local(
         str(index_dir),
@@ -558,6 +572,9 @@ def verify_index(index_dir: Path, chunks: list[Document], embedding_model: Huggi
         for stored, chunk in zip(stored_chunks, chunks)
     ):
         raise ValueError(f"{index_dir} was built from different chunks; delete it and re-run")
+    if not check_vectors:
+        logger.info("Index verified: %d vectors match the chunks' texts and metadata", vector_count)
+        return
 
     stored_vectors = reloaded_index.reconstruct_n(0, vector_count)
     fresh_vectors = np.array(embedding_model.embed_documents([chunk.page_content for chunk in chunks]))
@@ -854,14 +871,21 @@ class RetrievalStack:
 
 
 def load_retriever(
-    chapters_path: Path = DEFAULT_CHAPTERS_PATH, index_dir: Path = DEFAULT_INDEX_DIR, k: int = TOP_K
+    chapters_path: Path = DEFAULT_CHAPTERS_PATH,
+    index_dir: Path = DEFAULT_INDEX_DIR,
+    k: int = TOP_K,
+    check_vectors: bool = True,
 ) -> RetrievalStack:
-    """Phases 4-6: chunk the saved chapters, load (or build) and verify the index, make the retriever."""
+    """Phases 4-6: chunk the saved chapters, load (or build) and verify the index, make the retriever.
+
+    check_vectors=False keeps the stale-index check (texts and metadata) but skips re-embedding
+    all chunks, for a faster start.
+    """
     if not chapters_path.exists():
         raise FileNotFoundError(f"{chapters_path} not found. Run rag_utils.prepare_corpus() first.")
     chapters = load_documents(chapters_path)
     chunks = chunk_chapters(chapters)
     embedding_model = load_embedding_model()
     vector_store, _ = build_or_load_index(chunks, embedding_model, index_dir)
-    verify_index(index_dir, chunks, embedding_model)
+    verify_index(index_dir, chunks, embedding_model, check_vectors=check_vectors)
     return RetrievalStack(chapters, chunks, embedding_model, vector_store, make_retriever(vector_store, k))

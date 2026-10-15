@@ -1,6 +1,6 @@
 """A chat-style web interface for the PDF study assistant (Phase 11).
 
-Ask a question, pick a model, and get a grounded answer whose page citations are links into
+Ask a question, pick a model and a search mode, and get a grounded answer whose page citations are links into
 the PDF. Every PDF link opens in one shared browser window ("survey_pdf"): the first click
 opens it, later clicks move that same window to the new page instead of opening another one.
 
@@ -35,6 +35,14 @@ MODELS = {
     "Gemini 3.7 Flash (Google, ~20 requests/day)": ("gemini", rag.GEMINI_MODEL, None),
 }
 DEFAULT_MODEL = "Qwen 3.8 27B (Groq)"  # most faithful citations in the Phase 7-8 comparisons
+
+# Phase 11: the top 5 chunks by meaning plus the top 5 by keywords (BM25) found 73% of the
+# evaluation's multi-page gold pages, against 42% for meaning alone.
+SEARCH_MODES = {
+    "Meaning + keywords (up to 10 passages)": "hybrid",
+    "Meaning only (5 passages)": "dense",
+}
+DEFAULT_SEARCH = "Meaning + keywords (up to 10 passages)"
 
 # Every PDF link is opened by this script in the one named window, which browsers reuse.
 HEAD = f"""
@@ -77,10 +85,10 @@ def link_citations(answer: str) -> str:
     return rag.BRACKETED.sub(replace, answer)
 
 
-def format_reply(answer: str, sources, model_label: str, seconds: float) -> str:
+def format_reply(answer: str, sources, model_label: str, search_label: str, seconds: float) -> str:
     """The answer with linked citations, then the source passages the model was given."""
     lines = [link_citations(answer), ""]
-    lines.append(f"<sub>{model_label} · {seconds:.1f} s · pages refer to `survey_chapters.pdf`</sub>")
+    lines.append(f"<sub>{model_label} · {search_label} · {seconds:.1f} s · pages refer to `survey_chapters.pdf`</sub>")
     lines.append("")
     lines.append("**Passages given to the model**" if answer.strip() == rag.NOT_IN_DOCUMENT else "**Sources**")
     for number, chunk in enumerate(sources, start=1):
@@ -91,34 +99,41 @@ def format_reply(answer: str, sources, model_label: str, seconds: float) -> str:
 
 
 class Assistant:
-    """Loads the retriever once and builds one chain per model on first use."""
+    """Loads both retrievers once and builds one chain per (model, search mode) on first use."""
 
     def __init__(self):
         rag.load_api_key("GROQ_API_KEY")
         self.stack = rag.load_retriever()
+        self.retrievers = {
+            "dense": self.stack.retriever,
+            "hybrid": rag.make_hybrid_retriever(self.stack.retriever, rag.make_bm25_retriever(self.stack.chunks)),
+        }
         self.chains = {}
 
-    def chain_for(self, model_label: str):
-        if model_label not in self.chains:
+    def chain_for(self, model_label: str, search_label: str):
+        key = (model_label, search_label)
+        if key not in self.chains:
             provider, model_id, reasoning_effort = MODELS[model_label]
             if provider == "groq":
                 llm = rag.make_groq_llm(model_id, reasoning_effort)
             else:
                 rag.load_api_key("GOOGLE_API_KEY")
                 llm = rag.make_gemini_llm(model_id)
-            self.chains[model_label] = rag.build_rag_chain_with_sources(self.stack.retriever, llm)
-        return self.chains[model_label]
+            retriever = self.retrievers[SEARCH_MODES[search_label]]
+            self.chains[key] = rag.build_rag_chain_with_sources(retriever, llm)
+        return self.chains[key]
 
-    def answer(self, message: str, history, model_label: str) -> str:
+    def answer(self, message: str, history, model_label: str, search_label: str) -> str:
         if not message.strip():
             return "Please type a question about the Economic Survey chapters."
         start = time.perf_counter()
         try:
-            result = rag.invoke_with_backoff(self.chain_for(model_label), message)
+            result = rag.invoke_with_backoff(self.chain_for(model_label, search_label), message)
         except Exception as error:  # show provider errors in the chat instead of crashing the page
             logger.exception("Request failed")
             return f"⚠️ **{model_label} could not answer:** {str(error)[:300]}\n\nTry another model from the list."
-        return format_reply(result["answer"], result["source_documents"], model_label, time.perf_counter() - start)
+        seconds = time.perf_counter() - start
+        return format_reply(result["answer"], result["source_documents"], model_label, search_label, seconds)
 
 
 def build_interface(assistant: Assistant) -> gr.Blocks:
@@ -128,10 +143,12 @@ def build_interface(assistant: Assistant) -> gr.Blocks:
             "Answers come only from five chapters of India's Economic Survey, with page links.",
             elem_id="title",
         )
-        model = gr.Dropdown(choices=list(MODELS), value=DEFAULT_MODEL, label="Model", scale=0)
+        with gr.Row():
+            model = gr.Dropdown(choices=list(MODELS), value=DEFAULT_MODEL, label="Model")
+            search = gr.Dropdown(choices=list(SEARCH_MODES), value=DEFAULT_SEARCH, label="Search")
         gr.ChatInterface(
             fn=assistant.answer,
-            additional_inputs=[model],
+            additional_inputs=[model, search],
             chatbot=gr.Chatbot(
                 placeholder="**Ask anything about the agriculture, services, industry, infrastructure "
                 "or climate chapters.**<br>Each question is answered on its own, from the document only.",

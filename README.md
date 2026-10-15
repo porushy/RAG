@@ -54,7 +54,7 @@ flowchart LR
 | **Join** | joins each chapter into one text, gluing paragraphs that continue across a page break, and records where every page starts | all 94 cross-page paragraphs stay whole; every chunk keeps its exact page range |
 | **Chunk** | 1,000 characters, up to 200 overlap, cut at paragraph → sentence → word boundaries | 615 chunks; 1% end mid-sentence |
 | **Embed & index** | `all-MiniLM-L6-v2` on the GPU (CPU fallback), normalised vectors, FAISS `IndexFlatIP` | for unit vectors the inner product **is** cosine similarity; the index is saved, reloaded and verified against the chunks |
-| **Retrieve** | top-5 chunks with cosine scores | raw scores are used: LangChain's "relevance score" turns an inner product upside down |
+| **Retrieve** | top-5 chunks with cosine scores, or hybrid: + top-5 by BM25 keywords | raw scores are used: LangChain's "relevance score" turns an inner product upside down |
 | **Generate** | an LCEL chain: `{"context": retriever \| format_docs, "question": RunnablePassthrough()} \| prompt \| llm \| StrOutputParser()`, plus a variant that returns the source chunks | temperature 0; no "thinking"; an exact refusal sentence; exponential backoff with jitter that honours the provider's suggested wait and stops on a daily quota |
 | **Check** | every cited page must be among the pages supplied; answers without citations are flagged | citations are read tolerantly (models write `[p. 55]`, `[Source 1 \| p. 55]`, `【p. 55】`) |
 
@@ -106,9 +106,38 @@ The port-cargo case is the most important: fluent, specific, **cited**, and wron
 check can't catch an answer to a slightly different question; only evaluation against known
 answers can.
 
-**Improvements these point to** (not implemented): table-aware extraction, with tables exempt
-from the junk-line filter; query decomposition or a larger *k* for multi-topic questions;
-routing counting questions to data extracted in advance; hybrid BM25 + dense retrieval.
+**Improvements these point to:**
+- **For multi-topic questions:** hybrid retrieval, now implemented (below), and query
+  decomposition or a larger *k*.
+- **For tables:** table-aware extraction, with tables exempt from the junk-line filter.
+- **For counting questions:** routing them to data extracted in advance.
+
+## Hybrid retrieval: meaning + keywords (Phase 11)
+
+Dense search compares **meanings**. A question that mixes several topics becomes one vector
+that averages them, and rare names (*"Quality Control Orders"*, *"ULIP"*) barely move it.
+**BM25** keyword search compares **words**, weighted by how rare they are. The hybrid retriever
+gives the LLM the **top 5 chunks by meaning plus the top 5 by keywords** (duplicates removed,
+7–10 chunks in all). Each method keeps its slots, so neither can crowd out the other.
+
+| Retrieval (same 20 questions) | Chunks | Factual: gold page found | Analytical: share of gold pages found |
+|---|---|---|---|
+| Dense top 5 | 5 | 15 / 15 | 42% |
+| BM25 top 5 | 5 | 15 / 15 | 58% |
+| Dense top 10 | 10 | 15 / 15 | 58% |
+| **Hybrid 5 + 5** | 7.7–8.6 on average | 15 / 15 | **73%** |
+
+Hybrid beats simply doubling the dense chunks, with fewer chunks, so the gain comes from the
+keyword search, not from the extra context. With Qwen 3.8 27B answering:
+- analytical gold pages cited rose from 32% to 53%;
+- refusals fell from 1 to 0, and the soil-carbon / grid / minerals question got a grounded answer
+  instead of a refusal;
+- factual accuracy was unchanged (14 / 15).
+
+The cost is about twice the input tokens per question, and one more chance to mis-cite: one answer
+cited a page it wasn't given, which the citation check flagged. In code:
+`rag.make_hybrid_retriever(stack.retriever, rag.make_bm25_retriever(stack.chunks))`, a drop-in
+replacement for the retriever in any chain.
 
 ## Why RAG instead of long context?
 
@@ -213,12 +242,13 @@ A chat-style interface, built with Gradio:
 python app.py        # then open http://127.0.0.1:7860
 ```
 
-- **Ask a question, choose a model.** The models are Qwen 3.8 27B (default), GPT OSS 120B and
-  GPT OSS 20B on Groq, or Gemini 3.7 Flash. Each question is answered on its own, from the
-  document only.
+- **Ask a question; choose a model and a search mode.**
+  - Models: Qwen 3.8 27B (default), GPT OSS 120B and GPT OSS 20B on Groq, or Gemini 3.7 Flash.
+  - Search: *meaning + keywords* (hybrid, default) or *meaning only* (the original 5 passages).
+  - Each question is answered on its own, from the document only.
 - **Every citation is a link into the PDF.** It opens `survey_chapters.pdf` at the cited page
-  in the browser's built-in viewer (`#page=N`). The five source passages the model was given
-  are listed underneath, each with its own page link.
+  in the browser's built-in viewer (`#page=N`). The source passages the model was given are
+  listed underneath, each with its own page link.
 - **One PDF window, reused.** All page links open in a single named browser window
   (`window.open(url, "survey_pdf")`). The first click opens it; later clicks move that same
   window to the new page instead of opening another one. Browsers may not bring the window to

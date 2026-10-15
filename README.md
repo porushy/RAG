@@ -300,8 +300,10 @@ python app.py        # then open http://127.0.0.1:7860
   newest first, with *New chat*. They are kept in the server's memory: they survive a page reload
   and are cleared when `app.py` stops.
 - **Nothing on the page is specific to this document** except its file name, read from the
-  configuration, so the same interface works for another PDF. Light and dark themes follow your
-  system setting.
+  configuration, so the same interface works for another PDF.
+- **Light, dark or system theme**, chosen with the switch at the top right and remembered in the
+  browser. Answers are set in Source Serif 4 and the interface in Inter (Google Fonts), with
+  system fonts as the fallback offline.
 - **Provider errors stay in the chat**, with a hint to try another model.
 
 The app needs `data/survey_chapters.pdf` (from `download_data.py`), the cleaned text (from

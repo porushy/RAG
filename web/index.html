@@ -1,0 +1,389 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PDF Study Assistant</title>
+<style>
+  :root {
+    --bg: #faf9f5;
+    --sidebar: #f3f2ec;
+    --card: #ffffff;
+    --border: #e4e2da;
+    --text: #1f1e1d;
+    --muted: #7a776f;
+    --hover: #ebe9e1;
+    --accent: #c96442;
+    --accent-text: #ffffff;
+    --user-bubble: #efede6;
+    --link: #a3502f;
+    --shadow: 0 1px 2px rgba(0, 0, 0, 0.04), 0 4px 18px rgba(0, 0, 0, 0.05);
+    --serif: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, "Times New Roman", serif;
+    --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #262624; --sidebar: #1f1e1d; --card: #30302e; --border: #3e3e3a; --text: #f2f0e9;
+      --muted: #a29f95; --hover: #383835; --user-bubble: #3a3a37; --link: #e39b7b;
+      --shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 4px 18px rgba(0, 0, 0, 0.25);
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body { background: var(--bg); color: var(--text); font-family: var(--sans); font-size: 15px; display: flex; }
+  button, select, textarea { font: inherit; color: inherit; }
+
+  /* ---------- sidebar ---------- */
+  #sidebar {
+    width: 272px; flex-shrink: 0; background: var(--sidebar); border-right: 1px solid var(--border);
+    display: flex; flex-direction: column; padding: 12px 10px; transition: margin-left 0.2s ease;
+  }
+  body.sidebar-hidden #sidebar { margin-left: -272px; }
+  .sidebar-top { display: flex; align-items: center; justify-content: space-between; padding: 2px 6px 12px; }
+  .brand { font-family: var(--serif); font-size: 19px; display: flex; align-items: center; gap: 8px; }
+  .icon-button {
+    background: none; border: none; cursor: pointer; padding: 6px; border-radius: 8px; color: var(--muted);
+    display: inline-flex; align-items: center; justify-content: center;
+  }
+  .icon-button:hover { background: var(--hover); color: var(--text); }
+  #new-chat {
+    display: flex; align-items: center; gap: 10px; width: 100%; padding: 9px 10px; border-radius: 10px;
+    background: none; border: none; cursor: pointer; text-align: left;
+  }
+  #new-chat:hover { background: var(--hover); }
+  #new-chat .plus {
+    width: 24px; height: 24px; border-radius: 50%; background: var(--accent); color: var(--accent-text);
+    display: inline-flex; align-items: center; justify-content: center; font-size: 17px; line-height: 1;
+  }
+  .section-label { font-size: 12px; color: var(--muted); padding: 18px 10px 6px; }
+  #chat-list { flex: 1; overflow-y: auto; }
+  .chat-item {
+    display: block; width: 100%; text-align: left; background: none; border: none; cursor: pointer;
+    padding: 8px 10px; border-radius: 8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    font-size: 14px;
+  }
+  .chat-item:hover { background: var(--hover); }
+  .chat-item.active { background: var(--hover); font-weight: 500; }
+  .empty-list { font-size: 13px; color: var(--muted); padding: 4px 10px; }
+  .sidebar-foot { font-size: 12px; color: var(--muted); padding: 10px; border-top: 1px solid var(--border); }
+
+  /* ---------- main ---------- */
+  #main { flex: 1; min-width: 0; display: flex; flex-direction: column; position: relative; }
+  #show-sidebar { position: absolute; top: 12px; left: 12px; display: none; z-index: 2; }
+  body.sidebar-hidden #show-sidebar { display: inline-flex; }
+
+  #conversation { flex: 1; overflow-y: auto; padding: 56px 24px 24px; display: none; }
+  body.has-messages #conversation { display: block; }
+  .thread { max-width: 760px; margin: 0 auto; display: flex; flex-direction: column; gap: 22px; }
+  .user-message {
+    align-self: flex-end; max-width: 85%; background: var(--user-bubble); padding: 10px 16px;
+    border-radius: 16px; white-space: pre-wrap; line-height: 1.5;
+  }
+  .assistant-message { line-height: 1.65; }
+  .assistant-message .answer p { margin: 0 0 10px; }
+  .assistant-message .answer ul, .assistant-message .answer ol { margin: 4px 0 10px; padding-left: 22px; }
+  .assistant-message a { color: var(--link); text-decoration: underline; text-underline-offset: 2px; }
+  .meta { font-size: 12px; color: var(--muted); margin-top: 6px; }
+  details.sources { margin-top: 8px; font-size: 13.5px; }
+  details.sources summary { cursor: pointer; color: var(--muted); user-select: none; }
+  details.sources summary:hover { color: var(--text); }
+  details.sources ol { margin: 8px 0 0; padding-left: 22px; color: var(--muted); }
+  details.sources li { margin-bottom: 6px; line-height: 1.45; }
+  details.sources li a { margin-right: 6px; }
+  .thinking { color: var(--muted); display: flex; align-items: center; gap: 10px; }
+  .dots span {
+    display: inline-block; width: 6px; height: 6px; margin-right: 3px; border-radius: 50%;
+    background: var(--accent); animation: pulse 1.2s infinite ease-in-out;
+  }
+  .dots span:nth-child(2) { animation-delay: 0.15s; }
+  .dots span:nth-child(3) { animation-delay: 0.3s; }
+  @keyframes pulse { 0%, 80%, 100% { opacity: 0.25; } 40% { opacity: 1; } }
+
+  /* ---------- welcome + composer ---------- */
+  #composer-area { padding: 0 24px 22px; }
+  body:not(.has-messages) #composer-area { flex: 1; display: flex; flex-direction: column; justify-content: center; padding-bottom: 12vh; }
+  .composer-inner { max-width: 760px; width: 100%; margin: 0 auto; }
+  #welcome { text-align: center; margin-bottom: 28px; }
+  body.has-messages #welcome { display: none; }
+  #welcome h1 {
+    font-family: var(--serif); font-weight: 400; font-size: 40px; margin: 0;
+    display: inline-flex; align-items: center; gap: 14px;
+  }
+  #welcome p { color: var(--muted); margin: 10px 0 0; }
+  #welcome code { font-size: 13px; background: var(--hover); padding: 2px 6px; border-radius: 6px; }
+
+  .composer {
+    background: var(--card); border: 1px solid var(--border); border-radius: 22px; box-shadow: var(--shadow);
+    padding: 14px 14px 10px 18px;
+  }
+  .composer:focus-within { border-color: #cfccc2; }
+  #question {
+    width: 100%; border: none; outline: none; resize: none; background: transparent; line-height: 1.5;
+    min-height: 26px; max-height: 220px; font-size: 16px;
+  }
+  #question::placeholder { color: var(--muted); }
+  .composer-row { display: flex; justify-content: flex-end; margin-top: 6px; }
+  #send {
+    width: 34px; height: 34px; border-radius: 10px; border: none; cursor: pointer;
+    background: var(--accent); color: var(--accent-text); display: inline-flex; align-items: center; justify-content: center;
+  }
+  #send:disabled { opacity: 0.35; cursor: default; }
+
+  .options { display: flex; justify-content: space-between; align-items: center; padding: 8px 14px 0; }
+  .option-select {
+    appearance: none; -webkit-appearance: none; background: none; border: none; cursor: pointer;
+    color: var(--muted); font-size: 14px; padding: 4px 18px 4px 6px; border-radius: 8px;
+    background-image: linear-gradient(45deg, transparent 50%, currentColor 50%), linear-gradient(135deg, currentColor 50%, transparent 50%);
+    background-position: calc(100% - 9px) 55%, calc(100% - 5px) 55%; background-size: 4px 4px; background-repeat: no-repeat;
+  }
+  .option-select:hover { background-color: var(--hover); color: var(--text); }
+  .option-select option { color: #1f1e1d; }
+  #model { color: var(--text); }
+  .hint { text-align: center; font-size: 12px; color: var(--muted); padding-top: 10px; }
+  body:not(.has-messages) .hint { display: none; }
+</style>
+</head>
+<body>
+<aside id="sidebar">
+  <div class="sidebar-top">
+    <span class="brand">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 5a2 2 0 0 1 2-2h8l6 6v10a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z"/><path d="M14 3v6h6"/><path d="M8 13h8M8 17h5"/></svg>
+      Study Assistant
+    </span>
+    <button class="icon-button" id="hide-sidebar" title="Hide sidebar (Ctrl+B)" aria-label="Hide sidebar">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16"/></svg>
+    </button>
+  </div>
+  <button id="new-chat"><span class="plus">+</span> New chat</button>
+  <div class="section-label">Recents</div>
+  <div id="chat-list"></div>
+  <div class="sidebar-foot">Chats are kept until the app stops.</div>
+</aside>
+
+<main id="main">
+  <button class="icon-button" id="show-sidebar" title="Show sidebar (Ctrl+B)" aria-label="Show sidebar">
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16"/></svg>
+  </button>
+
+  <section id="conversation"><div class="thread" id="thread"></div></section>
+
+  <section id="composer-area">
+    <div class="composer-inner">
+      <div id="welcome">
+        <h1>
+          <svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 5a2 2 0 0 1 2-2h8l6 6v10a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z"/><path d="M14 3v6h6"/><path d="M8 13h8M8 17h5"/></svg>
+          What would you like to know?
+        </h1>
+        <p>Answers come only from <code id="document-name">your document</code>, with links to the pages they cite.</p>
+      </div>
+      <div class="composer">
+        <textarea id="question" rows="1" placeholder="Ask a question about the document"></textarea>
+        <div class="composer-row">
+          <button id="send" title="Send (Enter)" aria-label="Send" disabled>
+            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+          </button>
+        </div>
+      </div>
+      <div class="options">
+        <select class="option-select" id="search" title="How passages are found"></select>
+        <select class="option-select" id="model" title="Model"></select>
+      </div>
+      <div class="hint">Each question is answered on its own, from the document only.</div>
+    </div>
+  </section>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const state = { chatId: null, busy: false };
+
+// ---- every PDF link opens in one named window, which the browser reuses
+document.addEventListener("click", (event) => {
+  const link = event.target.closest("a[href*='/pdf?page=']");
+  if (!link) return;
+  event.preventDefault();
+  const viewer = window.open(link.href, "survey_pdf");
+  if (viewer) viewer.focus();
+}, true);
+
+// ---- sidebar
+function toggleSidebar() { document.body.classList.toggle("sidebar-hidden"); }
+$("hide-sidebar").onclick = toggleSidebar;
+$("show-sidebar").onclick = toggleSidebar;
+document.addEventListener("keydown", (event) => {
+  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "b") { event.preventDefault(); toggleSidebar(); }
+});
+
+async function refreshChatList() {
+  const chats = await (await fetch("/api/chats")).json();
+  const list = $("chat-list");
+  list.replaceChildren();
+  if (!chats.length) {
+    const empty = document.createElement("div");
+    empty.className = "empty-list";
+    empty.textContent = "No chats yet";
+    list.append(empty);
+  }
+  for (const chat of chats) {
+    const item = document.createElement("button");
+    item.className = "chat-item" + (chat.id === state.chatId ? " active" : "");
+    item.textContent = chat.title;
+    item.title = chat.title;
+    item.onclick = () => openChat(chat.id);
+    list.append(item);
+  }
+}
+
+// ---- messages
+function showConversation(show) { document.body.classList.toggle("has-messages", show); }
+
+function addUserMessage(text) {
+  const bubble = document.createElement("div");
+  bubble.className = "user-message";
+  bubble.textContent = text;
+  $("thread").append(bubble);
+}
+
+function addAssistantMessage(message) {
+  const box = document.createElement("div");
+  box.className = "assistant-message";
+  const answer = document.createElement("div");
+  answer.className = "answer";
+  answer.innerHTML = message.html;  // rendered on the server from Markdown, with raw HTML escaped
+  box.append(answer);
+  if (message.meta) {
+    const meta = document.createElement("div");
+    meta.className = "meta";
+    meta.textContent = message.meta;
+    box.append(meta);
+  }
+  if (message.sources && message.sources.length) {
+    const details = document.createElement("details");
+    details.className = "sources";
+    const summary = document.createElement("summary");
+    summary.textContent = (message.refused ? "Passages searched" : "Sources") + ` (${message.sources.length})`;
+    const list = document.createElement("ol");
+    for (const source of message.sources) {
+      const item = document.createElement("li");
+      const link = document.createElement("a");
+      link.href = source.href;
+      link.textContent = source.label;
+      item.append(link, document.createTextNode(source.preview + "…"));
+      list.append(item);
+    }
+    details.append(summary, list);
+    box.append(details);
+  }
+  $("thread").append(box);
+  return box;
+}
+
+function addThinking() {
+  const box = document.createElement("div");
+  box.className = "assistant-message thinking";
+  box.innerHTML = '<span class="dots"><span></span><span></span><span></span></span> Searching the document…';
+  $("thread").append(box);
+  return box;
+}
+
+function scrollToBottom() { $("conversation").scrollTop = $("conversation").scrollHeight; }
+
+async function openChat(chatId) {
+  const response = await fetch(`/api/chats/${chatId}`);
+  if (!response.ok) { newChat(); return; }
+  const chat = await response.json();
+  state.chatId = chat.id;
+  sessionStorage.setItem("chatId", chat.id);
+  $("thread").replaceChildren();
+  for (const message of chat.messages) {
+    if (message.role === "user") addUserMessage(message.text); else addAssistantMessage(message);
+  }
+  showConversation(chat.messages.length > 0);
+  scrollToBottom();
+  refreshChatList();
+}
+
+function newChat() {
+  state.chatId = null;
+  sessionStorage.removeItem("chatId");
+  $("thread").replaceChildren();
+  showConversation(false);
+  refreshChatList();
+  $("question").focus();
+}
+$("new-chat").onclick = newChat;
+
+// ---- asking
+const questionBox = $("question");
+function resizeQuestionBox() {
+  questionBox.style.height = "auto";
+  questionBox.style.height = Math.min(questionBox.scrollHeight, 220) + "px";
+  $("send").disabled = state.busy || !questionBox.value.trim();
+}
+questionBox.addEventListener("input", resizeQuestionBox);
+questionBox.addEventListener("keydown", (event) => {
+  if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); ask(); }
+});
+$("send").onclick = ask;
+
+async function ask() {
+  const question = questionBox.value.trim();
+  if (!question || state.busy) return;
+  state.busy = true;
+  questionBox.value = "";
+  resizeQuestionBox();
+  showConversation(true);
+  addUserMessage(question);
+  const thinking = addThinking();
+  scrollToBottom();
+  try {
+    const response = await fetch("/api/ask", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ question, model: $("model").value, search: $("search").value, chat_id: state.chatId }),
+    });
+    const data = await response.json();
+    thinking.remove();
+    if (!response.ok) {
+      addAssistantMessage({ html: `<p>⚠️ ${(data.detail || "Something went wrong.").replace(/</g, "&lt;")}</p>` });
+    } else {
+      state.chatId = data.chat_id;
+      sessionStorage.setItem("chatId", data.chat_id);
+      addAssistantMessage(data.reply);
+      refreshChatList();
+    }
+  } catch (error) {
+    thinking.remove();
+    addAssistantMessage({ html: "<p>⚠️ Could not reach the app. Is <code>python app.py</code> still running?</p>" });
+  }
+  state.busy = false;
+  resizeQuestionBox();
+  scrollToBottom();
+  questionBox.focus();
+}
+
+// ---- options below the composer
+function fillSelect(select, options, chosen, storageKey) {
+  for (const option of options) {
+    const element = document.createElement("option");
+    element.value = element.textContent = option;
+    select.append(element);
+  }
+  let saved = null;
+  try { saved = localStorage.getItem(storageKey); } catch (error) {}
+  select.value = options.includes(saved) ? saved : chosen;
+  select.onchange = () => { try { localStorage.setItem(storageKey, select.value); } catch (error) {} };
+}
+
+(async function start() {
+  const config = await (await fetch("/api/config")).json();
+  $("document-name").textContent = config.document;
+  fillSelect($("model"), config.models, config.default_model, "model");
+  fillSelect($("search"), config.search_modes, config.default_search, "search");
+  const remembered = sessionStorage.getItem("chatId");
+  if (remembered) await openChat(remembered); else refreshChatList();
+  questionBox.focus();
+})();
+</script>
+</body>
+</html>

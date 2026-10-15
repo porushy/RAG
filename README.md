@@ -182,7 +182,8 @@ question.
 
 ```text
 ├── rag_utils.py              # all pipeline functions, by phase (cleaning → evaluation)
-├── app.py                    # chat web interface (Gradio) with page links into the PDF
+├── app.py                    # web server: chat API, in-memory history, PDF page links
+├── web/index.html            # the chat page (HTML, CSS, JavaScript)
 ├── download_data.py          # Phase 1: fetch the Survey, slice pages 276–468
 ├── check_setup.py            # GPU check, live Gemini model list, one test call
 ├── notebooks/
@@ -276,28 +277,36 @@ that it still matches the chunks.
 
 ## Web interface
 
-A chat-style interface, built with Gradio:
+A chat interface in the style of modern AI assistants: a small FastAPI server (`app.py`) and one
+self-contained page (`web/index.html`, plain HTML, CSS and JavaScript).
 
 ```bash
 python app.py        # then open http://127.0.0.1:7860
 ```
 
-- **Ask a question; choose a model and a search mode.**
-  - Models: Qwen 3.8 27B (default), GPT OSS 120B and GPT OSS 20B on Groq, or Gemini 3.7 Flash.
-  - Search: *meaning + keywords* (hybrid, default) or *meaning only* (the original 5 passages).
-  - Each question is answered on its own, from the document only.
-- **Every citation is a link into the PDF.** It opens `survey_chapters.pdf` at the cited page
-  in the browser's built-in viewer (`#page=N`). The source passages the model was given are
-  listed underneath, each with its own page link.
+- **Ask, then choose how.** A large input box sits in the middle of an empty chat. Below it,
+  two small menus pick the **search mode** (*meaning + keywords*, the default, or *meaning
+  only*) and the **model** (Qwen 3.8 27B by default, GPT OSS 120B or 20B on Groq, or Gemini 3.7
+  Flash). Choices are remembered in the browser. Each question is answered on its own, from the
+  document only.
+- **Every citation is a link into the PDF.** It opens the PDF at the cited page in the browser's
+  built-in viewer (`#page=N`). The passages the model was given are listed under each answer,
+  collapsed, each with its own page link.
 - **One PDF window, reused.** All page links open in a single named browser window
-  (`window.open(url, "survey_pdf")`). The first click opens it; later clicks move that same
-  window to the new page instead of opening another one. Browsers may not bring the window to
-  the front on their own: switch to it and it will already be on the right page.
-- **Provider errors stay in the chat.** A used-up quota or an overloaded server shows a message
-  suggesting another model, instead of breaking the page.
+  (`window.open(url, "survey_pdf")`). Later clicks move that window to the new page instead of
+  opening another. Browsers may not bring it to the front: switch to it and it is already on the
+  right page.
+- **Chat history while the app runs.** A collapsible sidebar (Ctrl+B) lists your conversations,
+  newest first, with *New chat*. They are kept in the server's memory: they survive a page reload
+  and are cleared when `app.py` stops.
+- **Nothing on the page is specific to this document** except its file name, read from the
+  configuration, so the same interface works for another PDF. Light and dark themes follow your
+  system setting.
+- **Provider errors stay in the chat**, with a hint to try another model.
 
-The app needs `data/survey_chapters.pdf` (from `download_data.py`) and `GROQ_API_KEY` in `.env`
-(plus `GOOGLE_API_KEY` for Gemini).
+The app needs `data/survey_chapters.pdf` (from `download_data.py`), the cleaned text (from
+`notebooks/pdf_study_assistant_1.py`) and `GROQ_API_KEY` in `.env` (plus `GOOGLE_API_KEY` for
+Gemini). Its JSON API (`/api/ask`, `/api/chats`, `/api/config`) is listed at the top of `app.py`.
 
 ## License
 

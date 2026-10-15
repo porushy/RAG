@@ -31,8 +31,10 @@ faiss-cpu==1.15.0                   # vector index; CPU build is ample at this s
 rank-bm25==0.2.2                    # keyword (BM25) retrieval for the hybrid retriever
 pypdf==6.16.0                       # PDF text extraction + page slicing
 
-# --- Web interface (app.py, Phase 11) -------------------------------------
-gradio==6.30.0                      # chat UI; brings fastapi + uvicorn
+# --- Web interface (app.py + web/index.html, Phase 11) --------------------
+fastapi==0.143.1                    # serves the page, the JSON API and the PDF
+uvicorn==0.54.0                     # the web server that runs it
+markdown-it-py==4.2.0               # renders answers to HTML, escaping raw HTML
 
 # --- Runtime / notebook ---------------------------------------------------
 python-dotenv==1.2.2                # loads GOOGLE_API_KEY from .env

@@ -1,8 +1,18 @@
 """A chat-style web interface for the PDF study assistant (Phase 11).
 
-Ask a question, pick a model and a search mode, and get a grounded answer whose page citations are links into
-the PDF. Every PDF link opens in one shared browser window ("survey_pdf"): the first click
-opens it, later clicks move that same window to the new page instead of opening another one.
+Ask a question, pick a model and a search mode, and get a grounded answer whose page citations
+are links into the PDF. Every PDF link opens in one shared browser window ("survey_pdf"): the
+first click opens it, later clicks move that same window to the new page. Conversations are
+kept in memory while the app runs and are cleared when it stops.
+
+The page itself is web/index.html; this file serves it and the JSON API it calls:
+
+    GET  /                  the page
+    GET  /api/config        models, search modes, document name
+    GET  /api/chats         past conversations (newest first)
+    GET  /api/chats/{id}    one conversation's messages
+    POST /api/ask           answer a question, adding it to a conversation
+    GET  /pdf?page=N        the PDF (the viewer opens it at #page=N)
 
 Run from the project root (needs GROQ_API_KEY, and GOOGLE_API_KEY for Gemini, in .env):
 
@@ -11,66 +21,54 @@ Run from the project root (needs GROQ_API_KEY, and GOOGLE_API_KEY for Gemini, in
 
 from __future__ import annotations
 
+import html
 import logging
 import os
+import threading
 import time
+import uuid
+from pathlib import Path
 
-import gradio as gr
 import uvicorn
-from fastapi import FastAPI
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import FileResponse, HTMLResponse
+from markdown_it import MarkdownIt
+from pydantic import BaseModel
 
 import rag_utils as rag
 
 logger = logging.getLogger(__name__)
 
 HOST, PORT = "127.0.0.1", 7860
-PDF_WINDOW_NAME = "survey_pdf"
+PAGE_PATH = Path(__file__).resolve().parent / "web" / "index.html"
 
 # Display name -> how to build the model. Groq models are checked against the key's model list.
 MODELS = {
-    "Qwen 3.8 27B (Groq)": ("groq", "qwen/qwen3.8-27b", "none"),
-    "GPT OSS 120B (Groq)": ("groq", "openai/gpt-oss-120b", "low"),
-    "GPT OSS 20B (Groq)": ("groq", "openai/gpt-oss-20b", "low"),
-    "Gemini 3.7 Flash (Google, ~20 requests/day)": ("gemini", rag.GEMINI_MODEL, None),
+    "Qwen 3.8 27B": ("groq", "qwen/qwen3.8-27b", "none"),
+    "GPT OSS 120B": ("groq", "openai/gpt-oss-120b", "low"),
+    "GPT OSS 20B": ("groq", "openai/gpt-oss-20b", "low"),
+    "Gemini 3.7 Flash": ("gemini", rag.GEMINI_MODEL, None),
 }
-DEFAULT_MODEL = "Qwen 3.8 27B (Groq)"  # most faithful citations in the Phase 7-8 comparisons
+DEFAULT_MODEL = "Qwen 3.8 27B"  # most faithful citations in the Phase 7-8 comparisons
 
 # Phase 11: the top 5 chunks by meaning plus the top 5 by keywords (BM25) found 73% of the
 # evaluation's multi-page gold pages, against 42% for meaning alone.
 SEARCH_MODES = {
-    "Meaning + keywords (up to 10 passages)": "hybrid",
-    "Meaning only (5 passages)": "dense",
+    "Meaning + keywords": "hybrid",
+    "Meaning only": "dense",
 }
-DEFAULT_SEARCH = "Meaning + keywords (up to 10 passages)"
+DEFAULT_SEARCH = "Meaning + keywords"
 
-# Every PDF link is opened by this script in the one named window, which browsers reuse.
-HEAD = f"""
-<script>
-document.addEventListener("click", (event) => {{
-  const link = event.target.closest("a[href*='/pdf?page=']");
-  if (!link) return;
-  event.preventDefault();
-  const viewer = window.open(link.href, "{PDF_WINDOW_NAME}");
-  if (viewer) viewer.focus();
-}}, true);
-</script>
-"""
-
-CSS = """
-.gradio-container { max-width: 860px !important; margin: auto; }
-#title { text-align: center; margin-top: 8px; }
-#title p { color: var(--body-text-color-subdued); }
-"""
+MARKDOWN = MarkdownIt("commonmark", {"html": False})  # raw HTML in an answer is shown as text, not run
 
 
-def pdf_link(page: int, label: str) -> str:
-    """A Markdown link that opens the PDF at a page (the query makes each page a distinct URL)."""
-    return f"[{label}](/pdf?page={page}#page={page})"
+def pdf_href(page: int) -> str:
+    """The PDF at a page; the query makes each page a distinct URL, so a reused window reloads."""
+    return f"/pdf?page={page}#page={page}"
 
 
 def link_citations(answer: str) -> str:
-    """Turn every citation in the answer ([p. 55], [Source 1 | pp. 55-56], 【p. 55】) into PDF links."""
+    """Turn every citation in the answer ([p. 55], [Source 1 | pp. 55-56], 【p. 55】) into Markdown links."""
 
     def replace(match):
         references = rag.PAGE_REFERENCE.findall(match.group(1))
@@ -79,23 +77,63 @@ def link_citations(answer: str) -> str:
         links = []
         for first, last in references:
             label = f"p. {first}" if not last else f"pp. {first}-{last}"
-            links.append(pdf_link(int(first), label))
+            links.append(f"[{label}]({pdf_href(int(first))})")
         return "(" + "; ".join(links) + ")"
 
     return rag.BRACKETED.sub(replace, answer)
 
 
-def format_reply(answer: str, sources, model_label: str, search_label: str, seconds: float) -> str:
-    """The answer with linked citations, then the source passages the model was given."""
-    lines = [link_citations(answer), ""]
-    lines.append(f"<sub>{model_label} · {search_label} · {seconds:.1f} s · pages refer to `survey_chapters.pdf`</sub>")
-    lines.append("")
-    lines.append("**Passages given to the model**" if answer.strip() == rag.NOT_IN_DOCUMENT else "**Sources**")
-    for number, chunk in enumerate(sources, start=1):
-        pages = chunk.metadata["page_numbers"]
-        preview = " ".join(chunk.page_content.split())[:140]
-        lines.append(f"{number}. {pdf_link(pages[0], rag.page_reference(pages))}: {preview}…")
-    return "\n".join(lines)
+def assistant_message(answer: str, sources, meta: str) -> dict:
+    """An answer as the page shows it: HTML with linked citations, plus the passages used."""
+    return {
+        "role": "assistant",
+        "html": MARKDOWN.render(link_citations(answer)),
+        "refused": answer.strip() == rag.NOT_IN_DOCUMENT,
+        "meta": meta,
+        "sources": [
+            {
+                "label": rag.page_reference(chunk.metadata["page_numbers"]),
+                "href": pdf_href(chunk.metadata["page_numbers"][0]),
+                "preview": " ".join(chunk.page_content.split())[:160],
+            }
+            for chunk in sources
+        ],
+    }
+
+
+def error_message(text: str) -> dict:
+    return {"role": "assistant", "html": f"<p>⚠️ {html.escape(text)}</p>", "refused": False, "meta": "", "sources": []}
+
+
+class ChatStore:
+    """Conversations kept in memory: they last while the app runs and vanish when it stops."""
+
+    def __init__(self):
+        self._chats: dict[str, dict] = {}
+        self._lock = threading.Lock()  # requests are answered in parallel threads
+
+    def get_or_create(self, chat_id: str | None, first_question: str) -> dict:
+        with self._lock:
+            if chat_id in self._chats:
+                return self._chats[chat_id]
+            title = first_question if len(first_question) <= 60 else first_question[:57].rstrip() + "…"
+            chat = {"id": uuid.uuid4().hex, "title": title, "messages": [], "updated": time.time()}
+            self._chats[chat["id"]] = chat
+            return chat
+
+    def add(self, chat: dict, *messages: dict) -> None:
+        with self._lock:
+            chat["messages"].extend(messages)
+            chat["updated"] = time.time()
+
+    def summaries(self) -> list[dict]:
+        with self._lock:
+            chats = sorted(self._chats.values(), key=lambda chat: chat["updated"], reverse=True)
+            return [{"id": chat["id"], "title": chat["title"]} for chat in chats]
+
+    def get(self, chat_id: str) -> dict | None:
+        with self._lock:
+            return self._chats.get(chat_id)
 
 
 class Assistant:
@@ -123,48 +161,75 @@ class Assistant:
             self.chains[key] = rag.build_rag_chain_with_sources(retriever, llm)
         return self.chains[key]
 
-    def answer(self, message: str, history, model_label: str, search_label: str) -> str:
-        if not message.strip():
-            return "Please type a question about the Economic Survey chapters."
+    def answer(self, question: str, model_label: str, search_label: str) -> dict:
         start = time.perf_counter()
         try:
-            result = rag.invoke_with_backoff(self.chain_for(model_label, search_label), message)
-        except Exception as error:  # show provider errors in the chat instead of crashing the page
+            result = rag.invoke_with_backoff(self.chain_for(model_label, search_label), question)
+        except Exception as error:  # show provider errors in the chat instead of failing the request
             logger.exception("Request failed")
-            return f"⚠️ **{model_label} could not answer:** {str(error)[:300]}\n\nTry another model from the list."
-        seconds = time.perf_counter() - start
-        return format_reply(result["answer"], result["source_documents"], model_label, search_label, seconds)
+            return error_message(f"{model_label} could not answer: {str(error)[:300]} Try another model.")
+        meta = f"{model_label} · {search_label} · {time.perf_counter() - start:.1f} s"
+        return assistant_message(result["answer"], result["source_documents"], meta)
 
 
-def build_interface(assistant: Assistant) -> gr.Blocks:
-    with gr.Blocks(title="Economic Survey Study Assistant", fill_height=True) as demo:
-        gr.Markdown(
-            "## Economic Survey Study Assistant\n"
-            "Answers come only from five chapters of India's Economic Survey, with page links.",
-            elem_id="title",
+class Question(BaseModel):
+    question: str
+    model: str = DEFAULT_MODEL
+    search: str = DEFAULT_SEARCH
+    chat_id: str | None = None
+
+
+def create_app(assistant: Assistant, store: ChatStore) -> FastAPI:
+    app = FastAPI(title="PDF Study Assistant")
+
+    @app.get("/", response_class=HTMLResponse)
+    def page():
+        return PAGE_PATH.read_text(encoding="utf-8")
+
+    @app.get("/api/config")
+    def config():
+        return {
+            "document": rag.DEFAULT_PDF_PATH.name,
+            "models": list(MODELS),
+            "default_model": DEFAULT_MODEL,
+            "search_modes": list(SEARCH_MODES),
+            "default_search": DEFAULT_SEARCH,
+        }
+
+    @app.get("/api/chats")
+    def chats():
+        return store.summaries()
+
+    @app.get("/api/chats/{chat_id}")
+    def chat(chat_id: str):
+        found = store.get(chat_id)
+        if found is None:
+            raise HTTPException(404, "No such conversation (they are cleared when the app restarts).")
+        return {"id": found["id"], "title": found["title"], "messages": found["messages"]}
+
+    @app.post("/api/ask")
+    def ask(request: Question):  # a plain def: FastAPI runs it in a worker thread while the LLM answers
+        question = request.question.strip()
+        if not question:
+            raise HTTPException(400, "Please type a question.")
+        if request.model not in MODELS or request.search not in SEARCH_MODES:
+            raise HTTPException(400, "Unknown model or search mode.")
+        chat = store.get_or_create(request.chat_id, question)
+        reply = assistant.answer(question, request.model, request.search)
+        store.add(chat, {"role": "user", "text": question}, reply)
+        return {"chat_id": chat["id"], "title": chat["title"], "reply": reply}
+
+    @app.get("/pdf")
+    def pdf(page: int = 1):
+        # `page` only makes each page's URL distinct, so a reused window reloads and jumps;
+        # the browser's PDF viewer reads the #page=N fragment to open at the page.
+        return FileResponse(
+            rag.DEFAULT_PDF_PATH,
+            media_type="application/pdf",
+            headers={"Content-Disposition": f'inline; filename="{rag.DEFAULT_PDF_PATH.name}"'},
         )
-        with gr.Row():
-            model = gr.Dropdown(choices=list(MODELS), value=DEFAULT_MODEL, label="Model")
-            search = gr.Dropdown(choices=list(SEARCH_MODES), value=DEFAULT_SEARCH, label="Search")
-        gr.ChatInterface(
-            fn=assistant.answer,
-            additional_inputs=[model, search],
-            chatbot=gr.Chatbot(
-                placeholder="**Ask anything about the agriculture, services, industry, infrastructure "
-                "or climate chapters.**<br>Each question is answered on its own, from the document only.",
-                sanitize_html=True,
-                show_label=False,
-                height="68vh",
-            ),
-            textbox=gr.Textbox(placeholder="Ask a question…", submit_btn=True, show_label=False),
-            examples=[
-                ["How many Global Capability Centres does India host?"],
-                ["What was India's share in global services trade in 2024?"],
-                ["How many greenfield airports have been approved, and how many are operational?"],
-            ],
-            fill_height=True,
-        )
-    return demo
+
+    return app
 
 
 def main():
@@ -174,23 +239,10 @@ def main():
     if not rag.DEFAULT_PDF_PATH.exists():
         raise FileNotFoundError(f"{rag.DEFAULT_PDF_PATH} not found. Run `python download_data.py` first.")
 
-    assistant = Assistant()
-    server = FastAPI()
-
-    @server.get("/pdf")
-    def pdf(page: int = 1):
-        # `page` only makes each page's URL distinct, so a reused window reloads and jumps;
-        # the browser's PDF viewer reads the #page=N fragment to open at the page.
-        return FileResponse(
-            rag.DEFAULT_PDF_PATH,
-            media_type="application/pdf",
-            headers={"Content-Disposition": 'inline; filename="survey_chapters.pdf"'},
-        )
-
-    app = gr.mount_gradio_app(server, build_interface(assistant), path="/", head=HEAD, css=CSS,
-                              theme=gr.themes.Soft())
-    logger.info("Open http://%s:%d", HOST, PORT)
-    uvicorn.run(app, host=os.environ.get("HOST", HOST), port=int(os.environ.get("PORT", PORT)), log_level="warning")
+    app = create_app(Assistant(), ChatStore())
+    host, port = os.environ.get("HOST", HOST), int(os.environ.get("PORT", PORT))
+    logger.info("Open http://%s:%d", host, port)
+    uvicorn.run(app, host=host, port=port, log_level="warning")
 
 
 if __name__ == "__main__":

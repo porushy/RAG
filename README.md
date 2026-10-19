@@ -1,11 +1,10 @@
 # Personal PDF Study Assistant (RAG)
 
-Ask questions about a long policy document and get short answers **grounded in the document,
+Ask questions based on a pdf file and get short answers **grounded in the document,
 with page citations**, or a plain *"The document does not contain this information."* when it
 doesn't say.
 
-The corpus is five prose-heavy chapters (193 pages) of **India's Economic Survey**:
-agriculture, services, industry, infrastructure, and environment and climate. The pipeline is
+The corpus is five prose-heavy chapters of 193 pages. The pipeline is
 built from scratch with LangChain (LCEL), local `all-MiniLM-L6-v2` embeddings, FAISS, and a hosted
 LLM (Gemini Flash, or open models on Groq). It is evaluated on hand-written questions with known
 answer pages.
@@ -37,9 +36,8 @@ seconds); later runs reuse both. Details are in [Setup](#setup) and [Run](#run) 
 ## The problem
 
 A 193-page report is too long to read for one fact, and a general chatbot answers from its
-training data: possibly outdated, never cited, and sometimes invented. This project answers
-**only from the document**, and every claim comes with the page it was taken from, so it can
-be checked.
+training data which could be outdated, never cited, and sometimes even hellicinated. This project make sure that LLM's answers are
+**only from the document**, and every claim comes with the page it was taken from, so that the claims could be checked.
 
 ## How it works
 

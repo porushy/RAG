@@ -1,8 +1,7 @@
 # Personal PDF Study Assistant (RAG)
 
 Ask questions based on a pdf file and get short answers **grounded in the document,
-with page citations**, or a plain *"The document does not contain this information."* when it
-doesn't say.
+with page citations**, or a plain *"The document does not contain this information."* when the question asked does not relate to the source.
 
 The corpus is five prose-heavy chapters of 193 pages. The pipeline is
 built from scratch with LangChain (LCEL), local `all-MiniLM-L6-v2` embeddings, FAISS, and a hosted
